@@ -1,0 +1,172 @@
+---
+- name: Install Netwrix Agent and Components
+  hosts: windows
+  gather_facts: yes
+  vars:
+    download_path: "C:\\temp\\netwrix"
+    # Update these URLs with your actual download locations
+    netwrix_agent_url: "https://download.netwrix.com/agent/NetwrixAgent.msi"
+    uacors_url: "https://your-server.com/UACorsSvcSetup.msi"
+    compression_service_url: "https://your-server.com/Netwrix.WSA.CompressionService.Setup.msi"
+    
+    # Installation parameters
+    agent_install_args: "/quiet /norestart ADDLOCAL=ALL"
+    component_install_args: "/quiet /norestart"
+    
+  tasks:
+    - name: Create download directory
+      win_file:
+        path: "{{ download_path }}"
+        state: directory
+
+    - name: Download Netwrix Agent
+      win_get_url:
+        url: "{{ netwrix_agent_url }}"
+        dest: "{{ download_path }}\\NetwrixAgent.msi"
+        force: no
+      register: agent_download
+
+    - name: Download UACorsSvcSetup.msi
+      win_get_url:
+        url: "{{ uacors_url }}"
+        dest: "{{ download_path }}\\UACorsSvcSetup.msi"
+        force: no
+      register: uacors_download
+
+    - name: Download Netwrix.WSA.CompressionService.Setup.msi
+      win_get_url:
+        url: "{{ compression_service_url }}"
+        dest: "{{ download_path }}\\Netwrix.WSA.CompressionService.Setup.msi"
+        force: no
+      register: compression_service_download
+
+    - name: Install Netwrix Agent
+      win_package:
+        path: "{{ download_path }}\\NetwrixAgent.msi"
+        state: present
+        arguments: "{{ agent_install_args }}"
+        creates_service: NetwrixAgent
+        product_id: auto
+      when: agent_download is succeeded
+      register: agent_install
+
+    - name: Install UACorsSvcSetup
+      win_package:
+        path: "{{ download_path }}\\UACorsSvcSetup.msi"
+        state: present
+        arguments: "{{ component_install_args }}"
+        product_id: auto
+      when: uacors_download is succeeded
+      register: uacors_install
+
+    - name: Install Netwrix WSA Compression Service
+      win_package:
+        path: "{{ download_path }}\\Netwrix.WSA.CompressionService.Setup.msi"
+        state: present
+        arguments: "{{ component_install_args }}"
+        product_id: auto
+      when: compression_service_download is succeeded
+      register: compression_service_install
+
+    - name: Wait for services to start
+      pause:
+        seconds: 30
+      when: 
+        - agent_install is changed
+        - uacors_install is changed
+        - compression_service_install is changed
+
+    - name: Ensure Netwrix Agent service is running
+      win_service:
+        name: NetwrixAgent
+        state: started
+        start_mode: auto
+      when: agent_install is succeeded
+      ignore_errors: yes
+
+    - name: Ensure UACorsSvc service is running
+      win_service:
+        name: UACorsSvc
+        state: started
+        start_mode: auto
+      when: uacors_install is succeeded
+      ignore_errors: yes
+
+    - name: Ensure Netwrix Compression Service is running
+      win_service:
+        name: NetwrixWSACompressionService
+        state: started
+        start_mode: auto
+      when: compression_service_install is succeeded
+      ignore_errors: yes
+
+    - name: Verify all installations
+      win_shell: |
+        $results = @()
+        $services = @('NetwrixAgent', 'UACorsSvc', 'NetwrixWSACompressionService')
+        foreach ($service in $services) {
+            $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
+            if ($svc) {
+                $results += "$service : $($svc.Status)"
+            } else {
+                $results += "$service : Not Found"
+            }
+        }
+        $results -join "`n"
+      register: service_check
+      changed_when: false
+
+    - name: Display installation results
+      debug:
+        msg:
+          - "=== Installation Status ==="
+          - "Netwrix Agent: {{ 'Installed' if agent_install is succeeded else 'Failed' }}"
+          - "UACorsSvcSetup: {{ 'Installed' if uacors_install is succeeded else 'Failed' }}"
+          - "Compression Service: {{ 'Installed' if compression_service_install is succeeded else 'Failed' }}"
+          - "=== Service Status ==="
+          - "{{ service_check.stdout_lines }}"
+
+    - name: Create installation log
+      win_copy:
+        content: |
+          Netwrix Installation Log
+          ========================
+          Date: {{ ansible_date_time.iso8601 }}
+          Host: {{ inventory_hostname }}
+          
+          Components Installed:
+          - Netwrix Agent: {{ 'Success' if agent_install is succeeded else 'Failed' }}
+          - UACorsSvcSetup: {{ 'Success' if uacors_install is succeeded else 'Failed' }}
+          - Compression Service: {{ 'Success' if compression_service_install is succeeded else 'Failed' }}
+          
+          Service Status:
+          {{ service_check.stdout }}
+        dest: "{{ download_path }}\\installation_log.txt"
+      when: service_check is succeeded
+
+    - name: Clean up downloaded files
+      win_file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ download_path }}\\NetwrixAgent.msi"
+        - "{{ download_path }}\\UACorsSvcSetup.msi"
+        - "{{ download_path }}\\Netwrix.WSA.CompressionService.Setup.msi"
+      when: 
+        - agent_install is succeeded
+        - uacors_install is succeeded
+        - compression_service_install is succeeded
+      tags: 
+        - cleanup
+        - never
+
+  handlers:
+    - name: restart netwrix services
+      win_service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - NetwrixAgent
+        - UACorsSvc
+        - NetwrixWSACompressionService
+      ignore_errors: yes
